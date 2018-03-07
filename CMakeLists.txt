@@ -40,6 +40,7 @@ add_subdirectory(libdwarf)
 add_subdirectory(dwarfexample)
 add_subdirectory(dwarfdump)
 add_subdirectory(dwarfgen)
+add_subdirectory(dwarfdatarandohelper)
 
 add_custom_target(dd
 	DEPENDS ${DWARF_TARGETS} dwarfdump)
