@@ -4,3 +4,10 @@ junk*
 build/
 cscope.files
 TAGS
+.idea/
+cmake-build-debug/
+libdwarf/Makefile
+libdwarf/config.h
+libdwarf/config.log
+libdwarf/config.status
+libdwarf/libdwarf.h
