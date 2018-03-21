@@ -25,10 +25,10 @@ set_source_group(CONFIGURATION_FILES "Configuration Files" configure.cmake confi
 
 set_source_group(MASK_REGISTERS_SOURCES "Source Files" maskregisters.c)
 
-add_executable(maskregisters ${MASK_REGISTERS_SOURCES} ${MASK_REGISTERS_HEADERS} ${CONFIGURATION_FILES})
+add_executable(criu_datarando_helper ${MASK_REGISTERS_SOURCES} ${MASK_REGISTERS_HEADERS} ${CONFIGURATION_FILES})
 
-set_folder(maskregisters dwarfdatarandohelper)
+set_folder(criu_datarando_helper dwarfdatarandohelper)
 
-target_compile_definitions(maskregisters PRIVATE CONFPREFIX={CMAKE_INSTALL_PREFIX}/lib)
+target_compile_definitions(criu_datarando_helper PRIVATE CONFPREFIX={CMAKE_INSTALL_PREFIX}/lib)
 
-target_link_libraries(maskregisters PRIVATE ${dwarf-target} ${dwfzlib})
+target_link_libraries(criu_datarando_helper PRIVATE ${dwarf-target} ${dwfzlib})
