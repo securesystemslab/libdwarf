@@ -16,6 +16,13 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
 
 static int deal_with_fdes(Dwarf_Debug dbg);
 
+static void handle_regtable(Dwarf_Regtable3 *tab3);
+
+static void print_one_regentry(const char *prefix,
+                   struct Dwarf_Regtable_Entry3_s *entry,
+                   int registerNumber);
+
+static void getCFAlocation(struct Dwarf_Regtable_Entry3_s *entry);
 struct MaskRegisterLocation {
   unsigned long long program_counter;
   unsigned long long dwarf_format_register; //Need mapping with corresponding target ABI
@@ -25,9 +32,11 @@ struct MaskRegisterLocation {
   unsigned int isValid;
 };
 
-static void
-get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_addr, Dwarf_Addr targetPC,
-                char *variable_name);
+static void get_symbol_addr(Dwarf_Debug dgb,
+                            Dwarf_Die the_die,
+                            Dwarf_Addr subprogram_base_addr,
+                            Dwarf_Addr targetPC,
+                            char *variable_name);
 
 static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_Loc *op);
 
@@ -44,8 +53,9 @@ main(int argc, char **argv) {
   Dwarf_Error error;
   Dwarf_Handler errhand = 0;
   Dwarf_Ptr errarg = 0;
+  bool isFrameProcessingRequired = false;
 
-  if (argc < 3) {
+  if (argc < 4) {
     printf("Not reading from stdin...! Usage: ./maskregisters binary_path <program_counter_in_hex_format_end_with_null_char>");
     return (0);
   } else {
@@ -53,6 +63,11 @@ main(int argc, char **argv) {
     fd = open(filepath, O_RDONLY);
     char *PC_VAL = argv[2];
     targetPC = (Dwarf_Addr) strtol(PC_VAL, NULL, 16);
+
+    char *Frame_Info = argv[3];
+    if(strstr(Frame_Info, "processfde") != NULL) {
+      isFrameProcessingRequired = true;
+    }
   }
 
   if (fd < 0) {
@@ -62,11 +77,14 @@ main(int argc, char **argv) {
   res = dwarf_init(fd, DW_DLC_READ, errhand, errarg, &dbg, &error);
   if (res != DW_DLV_OK) {
     printf("Giving up, cannot do DWARF processing\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
-  read_cu_list(dbg);
+  if(!isFrameProcessingRequired) {
+    read_cu_list(dbg);
+  } else {
+    deal_with_fdes(dbg);
+  }
 
-  deal_with_fdes(dbg);
   res = dwarf_finish(dbg, &error);
   if (res != DW_DLV_OK) {
     printf("dwarf_finish failed!\n");
@@ -96,7 +114,7 @@ read_cu_list(Dwarf_Debug dbg) {
 
     if (res == DW_DLV_ERROR) {
       printf("Error in dwarf_next_cu_header\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
     if (res == DW_DLV_NO_ENTRY) {
       printf("DONE\n");
@@ -107,12 +125,12 @@ read_cu_list(Dwarf_Debug dbg) {
     res = dwarf_siblingof(dbg, no_die, &cu_die, &error);
     if (res == DW_DLV_ERROR) {
       printf("Error in dwarf_siblingof on CU die \n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
     if (res == DW_DLV_NO_ENTRY) {
       /* Impossible case. */
       printf("no entry! in dwarf_siblingof on CU die \n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
 
     get_die_and_siblings(dbg, cu_die, 0, NULL);
@@ -210,6 +228,9 @@ get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
                      (subprogram_base_addr + llbuf[dwarf_signed]->ld_lopc),
                      (subprogram_base_addr + llbuf[dwarf_signed]->ld_hipc));
             }
+          } else {
+            //$TODO$ Handle stack ops
+            exit(EXIT_FAILURE);
           }
           dwarf_dealloc(dgb, llbuf[dwarf_signed]->ld_s, DW_DLA_LOC_BLOCK);
           dwarf_dealloc(dgb, llbuf[dwarf_signed], DW_DLA_LOCDESC);
@@ -267,7 +288,8 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
 //            return true;
     default:
       printf("Handle non register location op \n");
-      break;
+      exit(EXIT_FAILURE);
+//      break;
   }
   return false;
 }
@@ -333,8 +355,6 @@ static void read_frame_data(Dwarf_Debug dbg);
 static void print_fde_instrs(Dwarf_Debug dbg, Dwarf_Fde fde,
                              Dwarf_Error *error, Dwarf_Signed fdenum);
 
-static void print_regtable(Dwarf_Regtable3 *tab3);
-
 static void print_cie_instrs(Dwarf_Cie cie, Dwarf_Error *error);
 
 #define UNDEF_VAL 2000
@@ -388,13 +408,13 @@ read_frame_data(Dwarf_Debug dbg) {
     res = dwarf_get_fde_list_eh(dbg, &cie_data, &cie_element_count,
                                 &fde_data, &fde_element_count, &error);
     if (res == DW_DLV_NO_ENTRY) {
-      printf("failed");
-      exit(0);
+      printf("failed. Expecting frame info");
+      exit(EXIT_FAILURE);
     }
   }
   if (res == DW_DLV_ERROR) {
     printf("Error reading frame data ");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
   printf("%" DW_PR_DSd " cies present. "
                  "%" DW_PR_DSd " fdes present. \n",
@@ -443,7 +463,7 @@ print_cie_instrs(Dwarf_Cie cie, Dwarf_Error *error) {
                            &instrp, &instr_len, error);
   if (res != DW_DLV_OK) {
     printf("Unable to get cie info!\n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 }
 
@@ -473,7 +493,7 @@ print_fde_instrs(Dwarf_Debug dbg,
   Dwarf_Off cie_offset = 0;
   Dwarf_Signed cie_index = 0;
   Dwarf_Off fde_offset = 0;
-  Dwarf_Addr arbitrary_addr = 0;
+
   Dwarf_Addr actual_pc = 0;
   Dwarf_Regtable3 tab3;
   int oldrulecount = 0;
@@ -488,19 +508,20 @@ print_fde_instrs(Dwarf_Debug dbg,
                             &fde_byte_length, &cie_offset, &cie_index, &fde_offset, error);
   if (res != DW_DLV_OK) {
     printf("Problem getting fde range \n");
-    exit(1);
+    exit(EXIT_FAILURE);
   }
 
 //    arbitrary_addr = lowpc + (func_length/2);
-  arbitrary_addr = 0x402356;
-  if (lowpc < arbitrary_addr && arbitrary_addr < (lowpc + func_length)) {
+  //targetPC in this context is the return address
+//  targetPC = 0x402347;
+  if (lowpc < targetPC && targetPC < (lowpc + func_length)) {
 
     printf("Print cie of fde %" DW_PR_DSd  "\n", fdenum);
     res = dwarf_get_cie_of_fde(fde, &cie, error);
     if (res != DW_DLV_OK) {
       printf("Error accessing fdenum %" DW_PR_DSd
                      " to get its cie\n", fdenum);
-      exit(1);
+      exit(EXIT_FAILURE);
     }
     print_cie_instrs(cie, error);
     printf("Print fde %" DW_PR_DSd  "\n", fdenum);
@@ -509,7 +530,7 @@ print_fde_instrs(Dwarf_Debug dbg,
                    "  and length 0x%" DW_PR_DUx
                    "  and addr we choose 0x%" DW_PR_DUx
                    "\n",
-           lowpc, func_length, arbitrary_addr);
+           lowpc, func_length, targetPC);
 
     /*  1 is arbitrary. We are winding up getting the
         rule count here while leaving things unchanged. */
@@ -521,27 +542,28 @@ print_fde_instrs(Dwarf_Debug dbg,
             sizeof(struct Dwarf_Regtable_Entry3_s) * oldrulecount);
     if (!tab3.rt3_rules) {
       printf("Unable to malloc for %d rules\n", oldrulecount);
-      exit(1);
+      exit(EXIT_FAILURE);
     }
 
-    res = dwarf_get_fde_info_for_all_regs3(fde, arbitrary_addr,
+    res = dwarf_get_fde_info_for_all_regs3(fde, targetPC,
                                            &tab3, &actual_pc, error);
 
     if (res != DW_DLV_OK) {
       printf("dwarf_get_fde_info_for_all_regs3 failed!\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
-    print_regtable(&tab3);
+    getCFAlocation(&(tab3.rt3_cfa_rule));
+    handle_regtable(&tab3);
 
     res = dwarf_get_fde_instr_bytes(fde, &outinstrs, &instrslen, error);
     if (res != DW_DLV_OK) {
       printf("dwarf_get_fde_instr_bytes failed!\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
     res = dwarf_get_cie_of_fde(fde, &cie, error);
     if (res != DW_DLV_OK) {
       printf("Error getting cie from fde\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
 
     res = dwarf_expand_frame_instructions(cie,
@@ -549,7 +571,7 @@ print_fde_instrs(Dwarf_Debug dbg,
                                           &frame_op_count, error);
     if (res != DW_DLV_OK) {
       printf("dwarf_expand_frame_instructions failed!\n");
-      exit(1);
+      exit(EXIT_FAILURE);
     }
     printf("Frame op count: %" DW_PR_DUu "\n", frame_op_count);
     print_frame_instrs(frame_op_list, frame_op_count);
@@ -572,55 +594,50 @@ print_reg(int r) {
       printf(" %d (CFA) ", r);
       break;
     default:
-      printf(" r%d ", r);
+      printf(" DW_OP_reg%d ", r);
       break;
   }
 }
 
 static void
 print_one_regentry(const char *prefix,
-                   struct Dwarf_Regtable_Entry3_s *entry) {
-  int is_cfa = !strcmp("cfa", prefix);
-  printf("%s ", prefix);
-  printf("type: %d %s ",
-         entry->dw_value_type,
+                   struct Dwarf_Regtable_Entry3_s *entry,
+                   int registerNumber) {
+  if(entry->dw_regnum == UNDEF_VAL) {
+    return;
+  }
+  if(entry->dw_regnum == SAME_VAL) {
+    //$TODO$ handle SAME_VAL
+    //$TODO$ PRINT WHICH REGISTER IS ACTUALLY USING THIS AND USE IN EMT
+    exit(EXIT_FAILURE);
+  }
+  printf("RegistersAlive type: %d register:",
+         entry->dw_value_type);
+  print_reg(registerNumber);
+  printf("ValueType: %s",
          (entry->dw_value_type == DW_EXPR_OFFSET) ? "DW_EXPR_OFFSET" :
          (entry->dw_value_type == DW_EXPR_VAL_OFFSET) ? "DW_EXPR_VAL_OFFSET" :
          (entry->dw_value_type == DW_EXPR_EXPRESSION) ? "DW_EXPR_EXPRESSION" :
          (entry->dw_value_type == DW_EXPR_VAL_EXPRESSION) ?
          "DW_EXPR_VAL_EXPRESSION" :
          "Unknown");
+
   switch (entry->dw_value_type) {
     case DW_EXPR_OFFSET:
-      print_reg(entry->dw_regnum);
-      printf(" offset_rel? %d ", entry->dw_offset_relevant);
+//      print_reg(entry->dw_regnum);
+//      printf(" offset_rel? %d ", entry->dw_offset_relevant);
       if (entry->dw_offset_relevant) {
-        printf(" offset  %" DW_PR_DSd " ",
-               entry->dw_offset_or_block_len);
-        if (is_cfa) {
-          printf("defines cfa value");
-        } else {
-          printf("address of value is CFA plus signed offset");
-        }
-        if (!is_cfa && entry->dw_regnum != CFA_VAL) {
-          printf(" compiler botch, regnum != CFA_VAL");
-        }
+        printf(" offset %" DW_PR_DSd " ", entry->dw_offset_or_block_len);
       } else {
+        //$TODO$ If this happens flip the register value if it is mask
         printf("value in register");
+        //$TODO$ Unhandled case
+        exit(EXIT_FAILURE);
       }
       break;
     case DW_EXPR_VAL_OFFSET:
-      print_reg(entry->dw_regnum);
-      printf(" offset  %" DW_PR_DSd " ",
+      printf(" offset %" DW_PR_DSd " ",
              entry->dw_offset_or_block_len);
-      if (is_cfa) {
-        printf("does this make sense? No?");
-      } else {
-        printf("value at CFA plus signed offset");
-      }
-      if (!is_cfa && entry->dw_regnum != CFA_VAL) {
-        printf(" compiler botch, regnum != CFA_VAL");
-      }
       break;
     case DW_EXPR_EXPRESSION:
       print_reg(entry->dw_regnum);
@@ -648,24 +665,25 @@ print_one_regentry(const char *prefix,
 }
 
 static void
-print_regtable(Dwarf_Regtable3 *tab3) {
+handle_regtable(Dwarf_Regtable3 *tab3) {
   int r;
   /* We won't print too much. A bit arbitrary. */
   int max = 32;
   if (max > tab3->rt3_reg_table_size) {
     max = tab3->rt3_reg_table_size;
   }
-  print_one_regentry("cfa", &tab3->rt3_cfa_rule);
-
   for (r = 0; r < max; r++) {
     char rn[30];
     snprintf(rn, sizeof(rn), "reg %d", r);
-    print_one_regentry(rn, tab3->rt3_rules + r);
+    print_one_regentry(rn, tab3->rt3_rules + r, r);
   }
-
-
 }
 
-
-
-
+static void
+getCFAlocation(struct Dwarf_Regtable_Entry3_s *CFA_Entry) {
+  printf("CFA type: %d register:", CFA_Entry->dw_value_type);
+  print_reg(CFA_Entry->dw_regnum);
+  if (CFA_Entry->dw_offset_relevant) {
+    printf("offset %" DW_PR_DSd " \n", CFA_Entry->dw_offset_or_block_len);
+  }
+}
