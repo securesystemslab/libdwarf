@@ -10,10 +10,18 @@
 
 static void read_cu_list(Dwarf_Debug dbg);
 
-static void get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die parent_sub_program);
+struct SubRoutineList {
+  Dwarf_Die *die;
+  struct SubRoutineList *parent;
+};
 
-static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die parent_sub_program);
+static void get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die parent_sub_program, struct SubRoutineList *parent_chain);
 
+static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die parent_sub_program, struct SubRoutineList *parentRef);
+static bool check_if_inlined_function(Dwarf_Debug dbg, Dwarf_Die parent_sub_program);
+static int
+get_abstract_origin_variable_name(Dwarf_Debug dbg,Dwarf_Attribute attr, Dwarf_Die *origin_die,
+                                  char *name_out, unsigned maxlen);
 static int deal_with_fdes(Dwarf_Debug dbg);
 
 static void handle_regtable(Dwarf_Regtable3 *tab3);
@@ -43,6 +51,28 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
 
 static Dwarf_Addr targetPC;
 
+
+
+static Dwarf_Die getNonInlinedParent(struct SubRoutineList *subRoutineList) {
+  while(subRoutineList->parent) {
+    Dwarf_Die *parent = subRoutineList->parent->die;
+    if(parent) {
+      Dwarf_Error error = 0;
+      Dwarf_Half parent_tag = 0;
+      int got_parent_tag = !dwarf_tag(*parent, &parent_tag, &error);
+      if (got_parent_tag && parent_tag == DW_TAG_subprogram) {
+        return *parent;
+      }
+      if(subRoutineList->parent->parent != NULL) {
+        subRoutineList = subRoutineList->parent->parent;
+      } else {
+        break;
+      }
+    }
+  }
+}
+
+
 int
 main(int argc, char **argv) {
 
@@ -54,7 +84,6 @@ main(int argc, char **argv) {
   Dwarf_Handler errhand = 0;
   Dwarf_Ptr errarg = 0;
   bool isFrameProcessingRequired = false;
-
   if (argc < 4) {
     printf("Not reading from stdin...! Usage: ./maskregisters binary_path <program_counter_in_hex_format_end_with_null_char>");
     return (0);
@@ -132,36 +161,128 @@ read_cu_list(Dwarf_Debug dbg) {
       printf("no entry! in dwarf_siblingof on CU die \n");
       exit(EXIT_FAILURE);
     }
-
-    get_die_and_siblings(dbg, cu_die, 0, NULL);
-
+//    struct SubRoutineList *parentChain =(struct SubRoutineList*)malloc(sizeof(struct SubRoutineList)) ;
+    get_die_and_siblings(dbg, cu_die, 0, NULL, NULL);
+    //$TODO$ free parentChain
     dwarf_dealloc(dbg, cu_die, DW_DLA_DIE);
 
   }
 }
 
+static void freeParentChain(Dwarf_Debug dbg, struct SubRoutineList *node) {
+  if(node == NULL) {
+    return;
+  }
+  if(node->die != NULL) {
+    dwarf_dealloc(dbg, node->die, DW_DLA_DIE);
+  }
+  freeParentChain(dbg, node->parent);
+  if(node->parent != NULL) {
+    free(node->parent);
+  }
+  if(node != NULL) {
+    free(node);
+  }
+}
+
+
 static void
-get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die parent_sub_program) {
+get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die parent, struct SubRoutineList *parentChain) {
   int res = DW_DLV_ERROR;
   Dwarf_Die cur_die = in_die;
-  Dwarf_Die sib_die = in_die;
+//  Dwarf_Die sib_die = in_die;
   Dwarf_Die child = 0;
   Dwarf_Error error;
+  Dwarf_Error *errp = 0;
+  for(;;) {
+    Dwarf_Die sib_die = 0;
+    res = dwarf_child(cur_die, &child, errp);
 
-  res = dwarf_child(cur_die, &child, &error);
-  check_if_local_var(dbg, child, cur_die);
-  if (res == DW_DLV_OK) { //DFS discovery of DIE continues here
-    get_die_and_siblings(dbg, child, in_level + 1, in_die); /* recur on the first son */
-    sib_die = child;
-    while (res == DW_DLV_OK) {
-      Dwarf_Die temp_sib_die = sib_die;
-      res = dwarf_siblingof(dbg, temp_sib_die, &sib_die, &error);
-      check_if_local_var(dbg, sib_die, cur_die);
-      get_die_and_siblings(dbg, sib_die, in_level + 1, in_die); /* recur others */
-    };
+    if(res == DW_DLV_ERROR) {
+      printf("Error in dwarf_child , level %d \n",in_level);
+      exit(1);
+    }
+    if(res == DW_DLV_OK) {
+      struct SubRoutineList *parentRef = parentChain;
+      bool isInlindFunc = check_if_inlined_function(dbg, child);
+      if(isInlindFunc) {
+        Dwarf_Die *c = (Dwarf_Die *) malloc(sizeof(Dwarf_Die));
+        struct SubRoutineList *subRoutineList = (struct SubRoutineList *) malloc(sizeof(struct SubRoutineList));
+        *c = child;
+        subRoutineList->die = c;
+        subRoutineList->parent = (struct SubRoutineList *) malloc(sizeof(struct SubRoutineList));
+        Dwarf_Die *actual_parent = (Dwarf_Die *) malloc(sizeof(Dwarf_Die));
+        *actual_parent=cur_die;
+        subRoutineList->parent->die = actual_parent;
+        subRoutineList->parent->parent = parentRef;
+        parentRef = subRoutineList;
+      }
 
+      check_if_local_var(dbg, child, cur_die, parentRef);
+      get_die_and_siblings(dbg,child,
+                           in_level+1, cur_die, parentRef);
+      //$TODO$ free parentRef
+      /* No longer need 'child' die. */
+      dwarf_dealloc(dbg,child,DW_DLA_DIE);
+      child = 0;
+    }
+    /* res == DW_DLV_NO_ENTRY or DW_DLV_OK */
+    res = dwarf_siblingof_b(dbg,cur_die, 1, &sib_die,errp);
+    if(res == DW_DLV_OK) {
+      int next_abbrev_code = dwarf_die_abbrev_code(sib_die);
+      struct SubRoutineList *parentRef = parentChain;
+      bool isInlindFunc = check_if_inlined_function(dbg, sib_die);
+      if(isInlindFunc) {
+        Dwarf_Die *c = (Dwarf_Die *) malloc(sizeof(Dwarf_Die));
+        struct SubRoutineList *subRoutineList = (struct SubRoutineList *) malloc(sizeof(struct SubRoutineList));
+        *c = sib_die;
+        subRoutineList->die = c;
+        subRoutineList->parent = (struct SubRoutineList *) malloc(sizeof(struct SubRoutineList));
+        Dwarf_Die *actual_parent = (Dwarf_Die *) malloc(sizeof(Dwarf_Die));
+        *actual_parent=parent;
+        subRoutineList->parent->die = actual_parent;
+        subRoutineList->parent->parent = parentRef;
+        parentRef = subRoutineList;
+        parentChain = subRoutineList;
+      }
+      check_if_local_var(dbg, sib_die, parent, parentRef);
+      //$TODO$ free parentRef
+    }
+    if(res == DW_DLV_ERROR) {
+      char *em = errp?dwarf_errmsg(error):"Error siblingof_b";
+      printf("Error in dwarf_siblingof_b , level %d :%s \n",
+             in_level,em);
+      exit(1);
+    }
+    if(res == DW_DLV_NO_ENTRY) {
+      /* Done at this level. */
+      break;
+    }
+    int next_abbrev_code = dwarf_die_abbrev_code(sib_die);
+    /* res == DW_DLV_OK */
+    if(cur_die != in_die) {
+      dwarf_dealloc(dbg,cur_die,DW_DLA_DIE);
+      cur_die = 0;
+    }
+    cur_die = sib_die;
   }
-  return;
+  
+
+//  res = dwarf_child(cur_die, &child, &error);
+//  if (res == DW_DLV_OK) { //DFS discovery of DIE continues here
+//    check_if_local_var(dbg, child, cur_die);
+//    get_die_and_siblings(dbg, child, in_level + 1); /* recur on the first son */
+//    sib_die = child;
+//    while (res == DW_DLV_OK) {
+//      Dwarf_Die temp_sib_die = sib_die;
+//      res = dwarf_siblingof(dbg, temp_sib_die, &sib_die, &error);
+//      check_if_local_var(dbg, sib_die, cur_die);
+//      get_die_and_siblings(dbg, sib_die, in_level + 1); /* recur others */
+//    };
+//
+//  }
+//  return;
+//  freeParentChain(dbg, parentChain);
 }
 
 
@@ -200,7 +321,7 @@ get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
         for (dwarf_signed = 0; dwarf_signed < lcount; dwarf_signed++) {
           Dwarf_Half no_of_ops = llbuf[dwarf_signed]->ld_cents;
           Dwarf_Loc *op = &llbuf[dwarf_signed]->ld_s[0];
-          struct MaskRegisterLocation *MaskLocation;
+          struct MaskRegisterLocation *MaskLocation = (struct MaskRegisterLocation *)malloc(sizeof(struct MaskRegisterLocation));
           bool IsRegisterLocationOp = getLocationResult(MaskLocation, op);
           if (IsRegisterLocationOp) {
             if (no_of_ops > 2) {
@@ -229,9 +350,12 @@ get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
                      (subprogram_base_addr + llbuf[dwarf_signed]->ld_hipc));
             }
           } else {
-            //$TODO$ Handle stack ops
-            exit(EXIT_FAILURE);
+//            free(MaskLocation);
+//              printf("Stored in stack; Handle stack ops %s\n", name);
+//            //$TODO$ Handle stack ops
+//            exit(EXIT_FAILURE);
           }
+          free(MaskLocation);
           dwarf_dealloc(dgb, llbuf[dwarf_signed]->ld_s, DW_DLA_LOC_BLOCK);
           dwarf_dealloc(dgb, llbuf[dwarf_signed], DW_DLA_LOCDESC);
         }
@@ -251,7 +375,7 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
     case DW_OP_reg3:
     case DW_OP_reg4:
     case DW_OP_reg5:
-//        case DW_OP_reg6:
+        case DW_OP_reg6:
 //        case DW_OP_reg7:
     case DW_OP_reg8:
     case DW_OP_reg9:
@@ -280,6 +404,21 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
       maskLocation->dwarf_format_register = target_op;
       maskLocation->isValid = 1;
       return true;
+    case DW_OP_dup:
+    case DW_OP_drop:
+    case DW_OP_pick:
+    case DW_OP_over:
+    case DW_OP_swap:
+    case DW_OP_rot:
+    case DW_OP_deref:
+    case DW_OP_deref_size:
+    case DW_OP_xderef:
+    case DW_OP_push_object_address:
+    case DW_OP_form_tls_address:
+    case DW_OP_call_frame_cfa:
+      printf("Stored in stack; Handle stack ops\n");
+      break;
+
 //        case DW_OP_regx:
 //            printf("DW_OP_regx LOCATION");
 //            //$TODO$ handle next parameter to identify location
@@ -287,15 +426,22 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
 //            maskLocation->isValid = true;
 //            return true;
     default:
-      printf("Handle non register location op \n");
-      exit(EXIT_FAILURE);
+      if(target_op >= DW_OP_breg0 && target_op <= DW_OP_breg31) {
+        printf("Register based addressing; \n");
+      }
+      if(target_op == DW_OP_fbreg){
+        printf("Register based addressing; fbreg \n");
+      }
+
+//      printf("Handle non register location op \n");
+//      exit(EXIT_FAILURE);
+      return false;
 //      break;
   }
   return false;
 }
 
-
-static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die parent_sub_program) {
+static bool check_if_inlined_function(Dwarf_Debug dbg, Dwarf_Die print_me) {
 //    Dwarf_Addr targetPC = 0x4023a0;
 //    Dwarf_Addr targetPC = 0x402356;
   char *name = 0;
@@ -324,30 +470,119 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
                     && !dwarf_loclist(attr, &loc_list, &num_loc, &error);
 
   int got_tag_name = !dwarf_tag(print_me, &tag, &error) && dwarf_get_TAG_name(tag, &tagname);
+  if(tag == DW_TAG_inlined_subroutine || tag == DW_TAG_lexical_block) {
+    printf("tag: %d %s  name: %s abbrev: %d\n", tag, tagname, name, dwarf_die_abbrev_code(print_me));
+    return true;
+  }
+  return false;
+}
+///home/prabhu/emt_proj/repos/test/exp2/target_apps/test_datarando_refresh2
 
-  //$TODO$ arg_mask formal parameters hold masks as well. Both in registers and in stack.
+static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die parent_die, struct SubRoutineList *parentRef) {
+//    Dwarf_Addr targetPC = 0x4023a0;
+//    Dwarf_Addr targetPC = 0x402356;
+  char *name = 0;
+  Dwarf_Error error = 0;
+  Dwarf_Half tag = 0;
+  Dwarf_Half parent_tag = 0;
+  const char *tagname = 0;
+  Dwarf_Line *line;
+
+  Dwarf_Bool bAttr;
+  Dwarf_Attribute attr;
+  int res = 0;
+  Dwarf_Unsigned in_line;
+  Dwarf_Unsigned in_file = 0;
+
+  Dwarf_Locdesc *loc_list;
+  Dwarf_Signed num_loc;
+
+  Dwarf_Off ptr_address = 0;
+
+  int has_line_data = !dwarf_hasattr(print_me, DW_AT_decl_line, &bAttr, &error) && bAttr;
+  int got_name = !dwarf_diename(print_me, &name, &error);
+  int got_line = !dwarf_attr(print_me, DW_AT_decl_line, &attr, &error) && !dwarf_formudata(attr, &in_line, &error);
+  int got_file = !dwarf_attr(print_me, DW_AT_decl_file, &attr, &error) && !dwarf_formudata(attr, &in_file, &error);
+  int got_loclist = !dwarf_hasattr(print_me, DW_AT_location, &bAttr, &error) &&
+                    !dwarf_attr(print_me, DW_AT_location, &attr, &error)
+                    && !dwarf_loclist(attr, &loc_list, &num_loc, &error);
+
+  int got_tag_name = !dwarf_tag(print_me, &tag, &error) && !dwarf_get_TAG_name(tag, &tagname);
+
+
+
+  char *origin_name = (char *)malloc(sizeof(char *));
+
+  Dwarf_Attribute abstract_origin;
+
+  Dwarf_Die parent_sub_program = parent_die;
+  if(got_tag_name && tag == DW_TAG_variable) {
+    int got_parent_tag = !dwarf_tag(parent_die, &parent_tag, &error);
+    if (got_parent_tag && parent_tag == DW_TAG_inlined_subroutine) {
+
+      int got_abstract_origin_attr = !dwarf_attr(print_me, DW_AT_abstract_origin, &abstract_origin, &error);
+      if (got_abstract_origin_attr) {
+        if(name == NULL) {
+          Dwarf_Die *origin_die = (Dwarf_Die *) malloc(sizeof(Dwarf_Die *));
+          get_abstract_origin_variable_name(dbg, abstract_origin, origin_die, origin_name, 80);
+          printf("origin name: %s\n", origin_name);
+          name = origin_name;
+          dwarf_dealloc(dbg, origin_die, DW_DLA_DIE);
+        }
+      }
+      struct SubRoutineList *temp = parentRef;
+      while (temp != NULL) {
+        got_parent_tag = !dwarf_tag(*temp->die, &parent_tag, &error);
+        if(got_parent_tag && parent_tag == DW_TAG_lexical_block) {
+          printf("Found scope we cannot process for:: [%s]\n", origin_name);
+          return;
+        }
+        if(got_parent_tag && parent_tag == DW_TAG_subprogram) {
+          parent_sub_program = *temp->die;
+          break;
+        }
+        temp = temp->parent;
+      }
+    }
+  }
+
+
+//$TODO$ arg_mask formal parameters hold masks as well. Both in registers and in stack.
   if (name != NULL && (strstr(name, "DATARANDO_DEBUG_HELP") != NULL   /*|| strstr(name, "arg_mask") != NULL*/)) {
-    //Found Variable
-    printf("tag: %d %s  name: %s \n", tag, tagname, name);
+    Dwarf_Unsigned inline_val;
+    char *parent_name = 0;
+    int got_parent_name = !dwarf_diename(parent_sub_program, &parent_name, &error);
+    int got_inline = !dwarf_attr(parent_sub_program, DW_AT_inline, &attr, &error) && !dwarf_formudata(attr, &inline_val, &error);
+    if(got_inline && inline_val == 1) {
+      if(got_parent_name) {
+        printf("Inside Inlined Function: [%s] ", parent_name);
+      }
+      printf("Ignoring this instance name: %s \n", name);
+    } else {
 
-    /* Location lists are structs; see ftp://ftp.sgi.com/sgi/dwarf/libdwarf.h */
-    if (got_loclist && loc_list[0].ld_cents == 1) {
-      printf("<%llu:%llu> tag: %d %s  name: %s loc: %lld\n", in_file, in_line, tag, tagname, name,
-             loc_list[0].ld_s[0].lr_number);
+      //Found Variable
+      printf("tag: %d %s  name: %s parent_function: %s\n", tag, tagname, name, parent_name);
+
+      /* Location lists are structs; see ftp://ftp.sgi.com/sgi/dwarf/libdwarf.h */
+      if (got_loclist && loc_list[0].ld_cents == 1) {
+        printf("<%llu:%llu> tag: %d %s  name: %s loc: %lld\n", in_file, in_line, tag, tagname, name,
+               loc_list[0].ld_s[0].lr_number);
+      }
+
+      Dwarf_Addr start;
+      Dwarf_Error err;
+
+      int got_low_pc = !dwarf_lowpc(parent_sub_program, &start, &err);
+      if (!got_low_pc) {
+        printf("Base address not found! Returning from processing \n");
+        exit(EXIT_FAILURE);
+      }
+      get_symbol_addr(dbg, print_me, start, targetPC, name);
     }
-
-    Dwarf_Addr start;
-    Dwarf_Error err;
-
-    int got_low_pc = !dwarf_lowpc(parent_sub_program, &start, &err);
-    if (!got_low_pc) {
-      printf("Base address not found! Returning from processing \n");
-      return;
-    }
-    get_symbol_addr(dbg, print_me, start, targetPC, name);
   }
 
   dwarf_dealloc(dbg, name, DW_DLA_STRING);
+  dwarf_dealloc(dbg, origin_name, DW_DLA_STRING);
 }
 
 static void read_frame_data(Dwarf_Debug dbg);
@@ -686,4 +921,63 @@ getCFAlocation(struct Dwarf_Regtable_Entry3_s *CFA_Entry) {
   if (CFA_Entry->dw_offset_relevant) {
     printf("offset %" DW_PR_DSd " \n", CFA_Entry->dw_offset_or_block_len);
   }
+}
+
+/* For inlined functions, try to find name */
+static int
+get_abstract_origin_variable_name(Dwarf_Debug dbg,Dwarf_Attribute attr, Dwarf_Die *origin_die,
+                             char *name_out, unsigned maxlen)
+{
+  Dwarf_Off off = 0;
+
+  Dwarf_Attribute *atlist = NULL;
+  Dwarf_Signed atcnt = 0;
+  Dwarf_Signed i = 0;
+  int dres = 0;
+  int atres = 0;
+  int name_found = 0;
+  int res = 0;
+  Dwarf_Error err = 0;
+
+  res = dwarf_global_formref(attr,&off,&err);
+  if (res != DW_DLV_OK) {
+    return DW_DLV_NO_ENTRY;
+  }
+  dres = dwarf_offdie(dbg,off,origin_die,&err);
+  if (dres != DW_DLV_OK) {
+    return DW_DLV_NO_ENTRY;
+  }
+  atres = dwarf_attrlist(*origin_die, &atlist, &atcnt, &err);
+  if (atres != DW_DLV_OK) {
+    dwarf_dealloc(dbg,*origin_die,DW_DLA_DIE);
+    return DW_DLV_NO_ENTRY;
+  }
+  for (i = 0; i < atcnt; i++) {
+    Dwarf_Half lattr = 0;
+    int ares = 0;
+
+    ares = dwarf_whatattr(atlist[i], &lattr, &err);
+    if (ares == DW_DLV_ERROR) {
+      break;
+    } else if (ares == DW_DLV_OK) {
+      if (lattr == DW_AT_name) {
+        int sres = 0;
+        char* temps = 0;
+        sres = dwarf_formstring(atlist[i], &temps, &err);
+        if (sres == DW_DLV_OK) {
+          strncpy(name_out, temps, strlen(temps));
+          name_found = 1;
+          break;
+        }
+      }
+    }
+  }
+  for (i = 0; i < atcnt; i++) {
+    dwarf_dealloc(dbg, atlist[i], DW_DLA_ATTR);
+  }
+  dwarf_dealloc(dbg, atlist, DW_DLA_LIST);
+  if (!name_found) {
+    return DW_DLV_NO_ENTRY;
+  }
+  return DW_DLV_OK;
 }

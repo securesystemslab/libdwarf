@@ -57,7 +57,7 @@
 
 
 static void read_frame_data(Dwarf_Debug dbg);
-static void print_fde_instrs(Dwarf_Debug dbg,
+static int print_fde_instrs(Dwarf_Debug dbg,
                              Dwarf_Fde fde, Dwarf_Error *error, Dwarf_Signed fdenum);
 static void print_regtable(Dwarf_Regtable3 *tab3);
 static void
@@ -163,16 +163,20 @@ read_frame_data(Dwarf_Debug dbg)
 
     for(fdenum = 0; fdenum < fde_element_count; ++fdenum) {
         Dwarf_Cie cie = 0;
-//        printf("Print cie of fde %" DW_PR_DSd  "\n",fdenum);
-//        res = dwarf_get_cie_of_fde(fde_data[fdenum],&cie,&error);
-//        if(res != DW_DLV_OK) {
-//            printf("Error accessing fdenum %" DW_PR_DSd
-//                " to get its cie\n",fdenum);
-//            exit(1);
-//        }
-//        print_cie_instrs(cie,&error);
+
+
 //        printf("Print fde %" DW_PR_DSd  "\n",fdenum);
-        print_fde_instrs(dbg,fde_data[fdenum],&error, fdenum);
+        int retval = print_fde_instrs(dbg,fde_data[fdenum],&error, fdenum);
+        if(retval > 0) {
+            printf("Print cie of fde %" DW_PR_DSd  "\n",fdenum);
+            res = dwarf_get_cie_of_fde(fde_data[fdenum],&cie,&error);
+            if(res != DW_DLV_OK) {
+                printf("Error accessing fdenum %" DW_PR_DSd
+                               " to get its cie\n",fdenum);
+                exit(1);
+            }
+            print_cie_instrs(cie,&error);
+        }
     }
 
     /* Done with the data. */
@@ -219,7 +223,7 @@ print_frame_instrs(Dwarf_Frame_Op *frame_op_list,
     }
 }
 
-static void
+static int
 print_fde_instrs(Dwarf_Debug dbg,
                  Dwarf_Fde fde, Dwarf_Error *error, Dwarf_Signed fdenum)
 {
@@ -241,7 +245,7 @@ print_fde_instrs(Dwarf_Debug dbg,
     Dwarf_Signed frame_op_count = 0;
     Dwarf_Cie cie = 0;
 
-
+    int retval = -1;
     res = dwarf_get_fde_range(fde,&lowpc,&func_length,&fde_bytes,
                               &fde_byte_length,&cie_offset,&cie_index,&fde_offset,error);
     if(res != DW_DLV_OK) {
@@ -252,7 +256,7 @@ print_fde_instrs(Dwarf_Debug dbg,
 //    arbitrary_addr = lowpc + (func_length/2);
     arbitrary_addr = 0x402356;
     if(lowpc < arbitrary_addr && arbitrary_addr < (lowpc + func_length)) {
-
+        retval = 1;
         printf("Print cie of fde %" DW_PR_DSd  "\n",fdenum);
         res = dwarf_get_cie_of_fde(fde,&cie,error);
         if(res != DW_DLV_OK) {
@@ -315,6 +319,7 @@ print_fde_instrs(Dwarf_Debug dbg,
         dwarf_dealloc(dbg, frame_op_list, DW_DLA_FRAME_BLOCK);
         free(tab3.rt3_rules);
     }
+    return retval;
 }
 
 static void

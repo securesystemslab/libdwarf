@@ -1071,7 +1071,9 @@ print_die_data_i(Dwarf_Debug dbg, Dwarf_Die print_me,
             print_comp_dir(dbg,print_me,level,sf);
         }
     } else {
-        printf("<%d> tag: %d %s  name: \"%s\"",level,tag,tagname,name);
+
+        int i = dwarf_die_abbrev_code(print_me);
+        printf("<%d> abbrev:<%d>  tag: %d %s  name: \"%s\"",level, i, tag,tagname,name);
         if (formname) {
             printf(" FORM 0x%x \"%s\"",formnum, formname);
         }
