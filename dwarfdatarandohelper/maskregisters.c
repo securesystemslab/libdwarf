@@ -351,7 +351,7 @@ get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
                 }
               }
               printf("%s pc: 0x%llx dwarf_format_register: 0x%llx number_of_bytes_in_reg: 0x%llx low_pc: 0x%llx high_pc: 0x%llx offset: 0x%llx isRegisterBased: %s\n",
-                     name,
+                    name,
                      MaskLocation->program_counter,
                      MaskLocation->dwarf_format_register,
                      MaskLocation->number_of_bytes_in_reg,
@@ -373,6 +373,8 @@ get_symbol_addr(Dwarf_Debug dgb, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
         }
         dwarf_dealloc(dgb, llbuf, DW_DLA_LIST);
       }
+    } else {
+      printf("This case is unhandled **************************************************************************");
     }
   }
 }
@@ -567,18 +569,18 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
     int got_inline = !dwarf_attr(parent_sub_program, DW_AT_inline, &attr, &error) && !dwarf_formudata(attr, &inline_val, &error);
     if(got_inline && inline_val == 1) {
       if(got_parent_name) {
-        char *target_fun = "cfar";
-        if(strncmp(parent_name, target_fun, 4) == 0) {
-          printf("put breakpoint now \n");
-        }
+//        char *target_fun = "cfar";
+//        if(strncmp(parent_name, target_fun, 4) == 0) {
+//          printf("put breakpoint now \n");
+//        }
         printf("Inside Inlined Function: [%s] ", parent_name);
       }
       printf("Ignoring this instance name: %s \n", name);
     } else {
-      char *target_string="cfar_check_fd";
-      if(strcmp(parent_name, target_string) == 0) {
-        printf("Found inlined function");
-      }
+//      char *target_string="cfar_check_fd";
+//      if(strcmp(parent_name, target_string) == 0) {
+//        printf("Found inlined function");
+//      }
       //Found Variable
       printf("tag: %d %s  name: %s parent_function: %s\n", tag, tagname, name, parent_name);
 
@@ -802,7 +804,7 @@ print_fde_instrs(Dwarf_Debug dbg,
 
 //    arbitrary_addr = lowpc + (func_length/2);
   //targetPC in this context is the return address
-//  targetPC = 0x402347;
+//  targetPC = 0x5634c90b3b09;
   if (lowpc < targetPC && targetPC < (lowpc + func_length)) {
 
     printf("Print cie of fde %" DW_PR_DSd  "\n", fdenum);
