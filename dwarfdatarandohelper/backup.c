@@ -10,6 +10,7 @@
 #include "../dwarfdump/esb.h"
 
 static void read_cu_list(Dwarf_Debug dbg);
+static Dwarf_Addr currentSubProgramAddress;
 
 struct SubRoutineList {
   Dwarf_Die *die;
@@ -28,8 +29,8 @@ static int deal_with_fdes(Dwarf_Debug dbg);
 static void handle_regtable(Dwarf_Regtable3 *tab3);
 
 static void print_one_regentry(const char *prefix,
-                   struct Dwarf_Regtable_Entry3_s *entry,
-                   int registerNumber);
+                               struct Dwarf_Regtable_Entry3_s *entry,
+                               int registerNumber);
 
 static void getCFAlocation(struct Dwarf_Regtable_Entry3_s *entry);
 struct MaskRegisterLocation {
@@ -46,8 +47,7 @@ static void get_symbol_addr(Dwarf_Debug dbg,
                             Dwarf_Die the_die,
                             Dwarf_Addr subprogram_base_addr,
                             Dwarf_Addr targetPC,
-                            char *variable_name,
-                            char *function_name);
+                            char *variable_name);
 
 static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_Loc *op);
 
@@ -87,7 +87,7 @@ main(int argc, char **argv) {
   Dwarf_Handler errhand = 0;
   Dwarf_Ptr errarg = 0;
   bool isFrameProcessingRequired = false;
-  if (argc < 3) {
+  if (argc < 4) {
     printf("Not reading from stdin...! Usage: ./maskregisters binary_path <program_counter_in_hex_format_end_with_null_char>");
     return (0);
   } else {
@@ -95,6 +95,11 @@ main(int argc, char **argv) {
     fd = open(filepath, O_RDONLY);
     char *PC_VAL = argv[2];
     targetPC = (Dwarf_Addr) strtol(PC_VAL, NULL, 16);
+
+    char *Frame_Info = argv[3];
+    if(strstr(Frame_Info, "processfde") != NULL) {
+      isFrameProcessingRequired = true;
+    }
   }
 
   if (fd < 0) {
@@ -106,9 +111,11 @@ main(int argc, char **argv) {
     printf("Giving up, cannot do DWARF processing\n");
     exit(EXIT_FAILURE);
   }
-
-  read_cu_list(dbg);
-  deal_with_fdes(dbg);
+  if(!isFrameProcessingRequired) {
+    read_cu_list(dbg);
+  } else {
+    deal_with_fdes(dbg);
+  }
 
   res = dwarf_finish(dbg, &error);
   if (res != DW_DLV_OK) {
@@ -262,7 +269,7 @@ get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die 
     }
     cur_die = sib_die;
   }
-  
+
 
 //  res = dwarf_child(cur_die, &child, &error);
 //  if (res == DW_DLV_OK) { //DFS discovery of DIE continues here
@@ -283,7 +290,7 @@ get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die 
 
 
 static void
-get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_addr, Dwarf_Addr targetPC, char *name, char *function_name) {
+get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_addr, Dwarf_Addr targetPC, char *name) {
 
   Dwarf_Error err;
   Dwarf_Attribute *attrs;
@@ -293,7 +300,6 @@ get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
   if (dwarf_attrlist(the_die, &attrs, &attrcount, &err) != DW_DLV_OK)
     printf("Error in dwarf_attlist\n");
 
-  printf("Handling [%s] in function [%s]\n", name, function_name);
   for (i = 0; i < attrcount; ++i) {
     Dwarf_Half attrcode;
     if (dwarf_whatattr(attrs[i], &attrcode, &err) != DW_DLV_OK)
@@ -320,14 +326,10 @@ get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
           Dwarf_Loc *op = &llbuf[dwarf_signed]->ld_s[0];
           struct MaskRegisterLocation *MaskLocation = (struct MaskRegisterLocation *)malloc(sizeof(struct MaskRegisterLocation));
           MaskLocation->isRegisterBasedAddressing = false;
-          if(function_name && strstr(function_name, "drrt_fgets") != NULL) {
-            printf("Catching a break \n");
-          }
           bool IsRegisterLocationOp = getLocationResult(MaskLocation, op);
           if (IsRegisterLocationOp) {
             if (no_of_ops > 2) {
               printf("unexpected state; We handle only 2 DWARF operations for register locations! Requires investigation. \n");
-              printf("Unhandled unable to process location for [%s]\n", name);
             } else {
               MaskLocation->program_counter = targetPC;
               if(no_of_ops == 2) {
@@ -347,35 +349,30 @@ get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
                   MaskLocation->offset = op->lr_number;
                   //Not the only register based operation
                   MaskLocation->isRegisterBasedAddressing = true;
-                } else {
-                  //DW_AT_Location byte block case
                 }
               }
 
-              Dwarf_Addr lowPC = llbuf[dwarf_signed]->ld_lopc;
-              Dwarf_Addr highPC = llbuf[dwarf_signed]->ld_hipc;
-
-              if(!function_name || strstr(function_name, "drrt_") == NULL) {
-                lowPC = subprogram_base_addr + llbuf[dwarf_signed]->ld_lopc;
-                highPC = subprogram_base_addr + llbuf[dwarf_signed]->ld_hipc;
-              } else {
-                printf("base address of libfn [%s] is [0x%llx] \n", function_name, subprogram_base_addr);
-              }
+              Dwarf_Addr lowPc = subprogram_base_addr + llbuf[dwarf_signed]->ld_lopc;
+              Dwarf_Addr highPc = subprogram_base_addr + llbuf[dwarf_signed]->ld_hipc;
 
               printf("%s pc: 0x%llx dwarf_format_register: 0x%llx number_of_bytes_in_reg: 0x%llx low_pc: 0x%llx high_pc: 0x%llx offset: 0x%llx isRegisterBased: %s\n",
                      name,
                      MaskLocation->program_counter,
                      MaskLocation->dwarf_format_register,
                      MaskLocation->number_of_bytes_in_reg,
-                     lowPC,
-                     highPC,
+                     lowPc,
+                     highPc,
                      MaskLocation->offset,
                      (MaskLocation->isRegisterBasedAddressing) ? "true" : "false"
               );
             }
           } else {
-              printf("Unhandled unable to process opcode for [%s]\n", name);
-              //$TODO$ Handle stack ops
+//            currentSubProgramAddress = subprogram_base_addr;
+//            deal_with_fdes(dbg);
+//            free(MaskLocation);
+//              printf("Stored in stack; Handle stack ops %s\n", name);
+//            //$TODO$ Handle stack ops
+//            exit(EXIT_FAILURE);
           }
           free(MaskLocation);
           dwarf_dealloc(dbg, llbuf[dwarf_signed]->ld_s, DW_DLA_LOC_BLOCK);
@@ -384,13 +381,14 @@ get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
         dwarf_dealloc(dbg, llbuf, DW_DLA_LIST);
       }
     } else {
-      printf("The attribute we got is **************************************************************************[%d]\n", attrcode);
+      printf("This case is unhandled **************************************************************************\n");
     }
   }
 }
 
 static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_Loc *op) {
   unsigned int target_op = op->lr_atom;
+
   switch (target_op) {
     case DW_OP_reg0: //rax
     case DW_OP_reg1: //rdx
@@ -399,6 +397,7 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
     case DW_OP_reg4:
     case DW_OP_reg5:
     case DW_OP_reg6:
+      printf("Stored in Reg6; Handle stack ops\n");
 //        case DW_OP_reg7:
     case DW_OP_reg8:
     case DW_OP_reg9:
@@ -408,85 +407,57 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
     case DW_OP_reg13:
     case DW_OP_reg14:
     case DW_OP_reg15:
-    case DW_OP_reg16:
-    case DW_OP_reg17:
-    case DW_OP_reg18:
-    case DW_OP_reg19:
-    case DW_OP_reg20:
-    case DW_OP_reg21:
-    case DW_OP_reg22:
-    case DW_OP_reg23:
-    case DW_OP_reg24:
-    case DW_OP_reg25:
-    case DW_OP_reg26:
-    case DW_OP_reg27:
-    case DW_OP_reg28:
-    case DW_OP_reg29:
-    case DW_OP_reg30:
-    case DW_OP_reg31:
+//        case DW_OP_reg16:
+//        case DW_OP_reg17:
+//        case DW_OP_reg18:
+//        case DW_OP_reg19:
+//        case DW_OP_reg20:
+//        case DW_OP_reg21:
+//        case DW_OP_reg22:
+//        case DW_OP_reg23:
+//        case DW_OP_reg24:
+//        case DW_OP_reg25:
+//        case DW_OP_reg26:
+//        case DW_OP_reg27:
+//        case DW_OP_reg28:
+//        case DW_OP_reg29:
+//        case DW_OP_reg30:
+//        case DW_OP_reg31:
       maskLocation->dwarf_format_register = target_op;
       return true;
-      //$TODO$ begin - Stored in stack; Handle stack ops
     case DW_OP_dup:
-      printf("Unhandled [DW_OP_dup]\n");
-      break;
     case DW_OP_drop:
-      printf("Unhandled [DW_OP_drop]\n");
-      break;
     case DW_OP_pick:
-      printf("Unhandled [DW_OP_pick]\n");
-      break;
     case DW_OP_over:
-      printf("Unhandled [DW_OP_over]\n");
-      break;
     case DW_OP_swap:
-      printf("Unhandled [DW_OP_swap]\n");
-      break;
     case DW_OP_rot:
-      printf("Unhandled [DW_OP_rot]\n");
-      break;
     case DW_OP_deref:
-      printf("Unhandled [DW_OP_deref]\n");
-      break;
     case DW_OP_deref_size:
-      printf("Unhandled [DW_OP_deref_size]\n");
-      break;
     case DW_OP_xderef:
-      printf("Unhandled [DW_OP_xderef]\n");
-      break;
     case DW_OP_push_object_address:
-      printf("Unhandled [DW_OP_push_object_address]\n");
-      break;
     case DW_OP_form_tls_address:
-      printf("Unhandled [DW_OP_form_tls_address]\n");
-      break;
     case DW_OP_call_frame_cfa:
-      printf("Unhandled [DW_OP_call_frame_cfa]\n");
+      printf("Stored in stack; Handle stack ops\n");
       break;
-      //$TODO$ end - Stored in stack; Handle stack ops
 
-
-    case DW_OP_regx:
-      printf("Unhandled [DW_OP_regx] . Might work. Needs verification\n");
-      //$TODO$ handle next parameter to identify location
-      maskLocation->dwarf_format_register = target_op;
-      break;
+//        case DW_OP_regx:
+//            printf("DW_OP_regx LOCATION");
+//            //$TODO$ handle next parameter to identify location
+//            maskLocation->dwarf_format_register = target_op;
+//            return true;
     default:
       if(target_op >= DW_OP_breg0 && target_op <= DW_OP_breg31) {
         printf("Register based addressing; \n");
         return true;
       }
       if(target_op == DW_OP_fbreg){
-        printf("Unhandled [DW_OP_fbreg] LOCATION\n");
         printf("Register based addressing; fbreg \n");
-//      Example:
-//      DW_OP_fbreg -50
-//        Given a DW_AT_frame_base value of “DW_OP_breg31 64,” this example
-//        computes the address of a local variable that is -50 bytes from a logical frame pointer that is computed by adding 64 to the current stack pointer (register 31).
-        break;
       }
-      printf("Unhandled [0x%x] LOCATION\n ", target_op);
-      break;
+
+//      printf("Handle non register location op \n");
+//      exit(EXIT_FAILURE);
+      return false;
+//      break;
   }
   return false;
 }
@@ -605,12 +576,21 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
     int got_inline = !dwarf_attr(parent_sub_program, DW_AT_inline, &attr, &error) && !dwarf_formudata(attr, &inline_val, &error);
     if(got_inline && inline_val == 1) {
       if(got_parent_name) {
+//        char *target_fun = "cfar";
+//        if(strncmp(parent_name, target_fun, 4) == 0) {
+//          printf("put breakpoint now \n");
+//        }
         printf("Inside Inlined Function: [%s] ", parent_name);
       }
       printf("Ignoring this instance name: %s \n", name);
     } else {
+//      char *target_string="cfar_check_fd";
+//      if(strcmp(parent_name, target_string) == 0) {
+//        printf("Found inlined function");
+//      }
       //Found Variable
       printf("tag: %d %s  name: %s parent_function: %s\n", tag, tagname, name, parent_name);
+
       /* Location lists are structs; see ftp://ftp.sgi.com/sgi/dwarf/libdwarf.h */
       if (got_loclist && loc_list[0].ld_cents == 1) {
         printf("<%llu:%llu> tag: %d %s  name: %s loc: %lld\n", in_file, in_line, tag, tagname, name,
@@ -622,15 +602,45 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
 
       int got_low_pc = !dwarf_lowpc(parent_sub_program, &start, &err);
       if (!got_low_pc) {
+        Dwarf_Attribute attrib = 0;
         int has_range_attr = !dwarf_hasattr(print_me, DW_AT_ranges, &bAttr, &error) && bAttr;
         if(has_range_attr) {
-          printf("Unhandled [DW_AT_ranges] \n");
+//          dwarf_attr(parent_sub_program, DW_AT_inline, &attrib, &error);
+//          Dwarf_Half theform = 0;
+//
+//          struct esb_s rangesstr;
+//          esb_constructor(&rangesstr);
+//
+//          int rv = dwarf_whatform(attrib, &theform, &error);
+//          if (rv == DW_DLV_ERROR) {
+//            printf("Range attribute form error\n");
+//            exit(EXIT_FAILURE);
+//          } else if (rv == DW_DLV_NO_ENTRY) {
+//            esb_destructor(&rangesstr);
+//            printf("Range attribute with no entry\n");
+//            exit(EXIT_FAILURE);
+//          }
+//
+//          esb_empty_string(&rangesstr);
+//
+////          get_attr_value(dbg, tag, NULL,
+////                         0, attrib, NULL, 0, &rangesstr,
+////                         FALSE, verbose);
+////          print_range_attribute(dbg, die, attr, attr_in, theform,
+////                                pd_dwarf_names_print_on_error, print_information,
+////                                &append_extra_string,
+////                                &esb_extra);
+////          esb_empty_string(&valname);
+////          esb_append(&valname, esb_get_string(&rangesstr));
+//          esb_destructor(&rangesstr);
+          printf("Handle rangestr \n");
+
         } else {
           printf("Base address not found! Returning from processing \n");
           exit(EXIT_FAILURE);
         }
       }
-      get_symbol_addr(dbg, print_me, start, targetPC, name, parent_name);
+      get_symbol_addr(dbg, print_me, start, targetPC, name);
     }
   }
 
@@ -980,7 +990,7 @@ getCFAlocation(struct Dwarf_Regtable_Entry3_s *CFA_Entry) {
 /* For inlined functions, try to find name */
 static int
 get_abstract_origin_variable_name(Dwarf_Debug dbg,Dwarf_Attribute attr, Dwarf_Die *origin_die,
-                             char *name_out, unsigned maxlen)
+                                  char *name_out, unsigned maxlen)
 {
   Dwarf_Off off = 0;
 
