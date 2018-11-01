@@ -47,6 +47,7 @@ static void get_symbol_addr(Dwarf_Debug dbg,
                             Dwarf_Addr subprogram_base_addr,
                             Dwarf_Addr targetPC,
                             char *variable_name,
+                            Dwarf_Die subprogram_die,
                             char *function_name);
 
 static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_Loc *op);
@@ -281,9 +282,41 @@ get_die_and_siblings(Dwarf_Debug dbg, Dwarf_Die in_die, int in_level, Dwarf_Die 
 //  freeParentChain(dbg, parentChain);
 }
 
+static void getFrameBaseAttributeRegister(Dwarf_Die subprogram_die) {
+
+  Dwarf_Error err;
+  Dwarf_Attribute *attrs;
+
+  Dwarf_Signed attrcount, i;
+  Dwarf_Attribute ret_attr = NULL;
+
+  if (dwarf_attrlist(subprogram_die, &attrs, &attrcount, &err) != DW_DLV_OK)
+    printf("Error in dwarf_attlist\n");
+
+  for (i = 0; i < attrcount; ++i) {
+    Dwarf_Half attrcode;
+    if (dwarf_whatattr(attrs[i], &attrcode, &err) != DW_DLV_OK)
+      printf("Error in dwarf_whatattr\n");
+
+    if(attrcode == DW_AT_frame_base) {
+      if(dwarf_attr(subprogram_die, attrcode, &ret_attr, &err) != DW_DLV_OK) {
+        printf("Failed to get DW_AT_frame_base attribute \n");
+      }
+      break;
+    }
+  }
+  if(ret_attr != NULL) {
+//    if(ret_attr->ar_attribute_form == DW_FORM_exprloc) {
+//
+//    } else {
+//
+//    }
+    printf("Found the value\n");
+  }
+}
 
 static void
-get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_addr, Dwarf_Addr targetPC, char *name, char *function_name) {
+get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_addr, Dwarf_Addr targetPC, char *name, Dwarf_Die subprogram_die, char *function_name) {
 
   Dwarf_Error err;
   Dwarf_Attribute *attrs;
@@ -347,8 +380,14 @@ get_symbol_addr(Dwarf_Debug dbg, Dwarf_Die the_die, Dwarf_Addr subprogram_base_a
                   MaskLocation->offset = op->lr_number;
                   //Not the only register based operation
                   MaskLocation->isRegisterBasedAddressing = true;
+                } else if (op->lr_atom == DW_OP_fbreg) {
+                  MaskLocation->dwarf_format_register = DW_OP_reg6; //$TODO$ Not quite the right way to do it. Assuming it from ABI but this value must come from dwarf data. Should be fine for now.
+                  MaskLocation->offset = op->lr_number;
+                  MaskLocation->isRegisterBasedAddressing = true;
+                  printf("Unhandled fbreg\n");
                 } else {
                   //DW_AT_Location byte block case
+                  //$TODO$ Already handled to set the dwarf register. But might have other cases.
                 }
               }
 
@@ -424,6 +463,7 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
     case DW_OP_reg29:
     case DW_OP_reg30:
     case DW_OP_reg31:
+    case DW_OP_fbreg:
       maskLocation->dwarf_format_register = target_op;
       return true;
       //$TODO$ begin - Stored in stack; Handle stack ops
@@ -475,15 +515,6 @@ static bool getLocationResult(struct MaskRegisterLocation *maskLocation, Dwarf_L
       if(target_op >= DW_OP_breg0 && target_op <= DW_OP_breg31) {
         printf("Register based addressing; \n");
         return true;
-      }
-      if(target_op == DW_OP_fbreg){
-        printf("Unhandled [DW_OP_fbreg] LOCATION\n");
-        printf("Register based addressing; fbreg \n");
-//      Example:
-//      DW_OP_fbreg -50
-//        Given a DW_AT_frame_base value of “DW_OP_breg31 64,” this example
-//        computes the address of a local variable that is -50 bytes from a logical frame pointer that is computed by adding 64 to the current stack pointer (register 31).
-        break;
       }
       printf("Unhandled [0x%x] LOCATION\n ", target_op);
       break;
@@ -630,7 +661,7 @@ static void check_if_local_var(Dwarf_Debug dbg, Dwarf_Die print_me, Dwarf_Die pa
           exit(EXIT_FAILURE);
         }
       }
-      get_symbol_addr(dbg, print_me, start, targetPC, name, parent_name);
+      get_symbol_addr(dbg, print_me, start, targetPC, name, parent_sub_program, parent_name);
     }
   }
 
